@@ -119,6 +119,19 @@
 #include <linux/mroute.h>
 #endif
 
+#ifdef CONFIG_ANDROID_PARANOID_NETWORK
+#include <linux/android_aid.h>
+
+static inline int current_has_network(void)
+{
+	return in_egroup_p(AID_INET) || capable(CAP_NET_RAW);
+}
+#else
+static inline int current_has_network(void)
+{
+	return 1;
+}
+#endif
 
 /* The inetsw table contains everything that inet_create needs to
  * build a new socket.
@@ -141,12 +154,12 @@ void inet_sock_destruct(struct sock *sk)
 	sk_mem_reclaim(sk);
 
 	if (sk->sk_type == SOCK_STREAM && sk->sk_state != TCP_CLOSE) {
-		pr_err("Attempt to release TCP socket in state %d %p\n",
+		WARN(1, "Attempt to release TCP socket in state %d %p\n",
 		       sk->sk_state, sk);
 		return;
 	}
 	if (!sock_flag(sk, SOCK_DEAD)) {
-		pr_err("Attempt to release alive inet socket %p\n", sk);
+		WARN(1, "Attempt to release alive inet socket %p\n", sk);
 		return;
 	}
 
@@ -284,6 +297,9 @@ static int inet_create(struct net *net, struct socket *sock, int protocol,
 	int try_loading_module = 0;
 	int err;
 
+	if (!current_has_network())
+		return -EACCES;
+
 	if (unlikely(!inet_ehash_secret))
 		if (sock->type != SOCK_RAW && sock->type != SOCK_DGRAM)
 			build_ehash_secret();
@@ -336,8 +352,7 @@ lookup_protocol:
 	}
 
 	err = -EPERM;
-	if (sock->type == SOCK_RAW && !kern &&
-	    !ns_capable(net->user_ns, CAP_NET_RAW))
+	if (sock->type == SOCK_RAW && !kern && !capable(CAP_NET_RAW))
 		goto out_rcu_unlock;
 
 	sock->ops = answer->ops;
@@ -594,6 +609,12 @@ static long inet_wait_for_connect(struct sock *sk, long timeo, int writebias)
  *	Connect to a remote host. There is regrettably still a little
  *	TCP 'magic' in here.
  */
+/* ++SSD_RIL: Garbage_Filter_TCP */
+#ifdef CONFIG_HTC_GARBAGE_FILTER
+int add_or_remove_port(struct sock *sk, int add_or_remove);
+#endif
+/* --SSD_RIL: Garbage_Filter_TCP */
+
 int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 			  int addr_len, int flags)
 {
@@ -631,6 +652,12 @@ int __inet_stream_connect(struct socket *sock, struct sockaddr *uaddr,
 			goto out;
 
 		sock->state = SS_CONNECTING;
+		/* ++SSD_RIL: Garbage_Filter_TCP */
+#ifdef CONFIG_HTC_GARBAGE_FILTER
+		if (sk != NULL)
+			add_or_remove_port(sk, 1);
+#endif
+		/* --SSD_RIL: Garbage_Filter_TCP */
 
 		/* Just entered SS_CONNECTING state; the only
 		 * difference is that return value in non-blocking
@@ -905,6 +932,7 @@ int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	case SIOCSIFPFLAGS:
 	case SIOCGIFPFLAGS:
 	case SIOCSIFFLAGS:
+	case SIOCKILLADDR:
 		err = devinet_ioctl(net, cmd, (void __user *)arg);
 		break;
 	default:

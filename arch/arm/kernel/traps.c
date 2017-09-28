@@ -25,6 +25,7 @@
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/sched.h>
+#include <linux/bug.h>
 
 #include <linux/atomic.h>
 #include <asm/cacheflush.h>
@@ -34,6 +35,8 @@
 #include <asm/unwind.h>
 #include <asm/tls.h>
 #include <asm/system_misc.h>
+
+#include <trace/events/exception.h>
 
 static const char *handler[]= {
 	"prefetch abort",
@@ -288,6 +291,12 @@ static unsigned long oops_begin(void)
 
 static void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 {
+#if defined(CONFIG_HTC_DEBUG_KP)
+       struct thread_info *thread = current_thread_info();
+       char sym_pc[KSYM_SYMBOL_LEN];
+       char sym_lr[KSYM_SYMBOL_LEN];
+#endif
+
 	if (regs && kexec_should_crash(current))
 		crash_kexec(regs);
 
@@ -301,10 +310,23 @@ static void oops_end(unsigned long flags, struct pt_regs *regs, int signr)
 	raw_local_irq_restore(flags);
 	oops_exit();
 
+#if defined(CONFIG_HTC_DEBUG_KP)
+	sprint_symbol(sym_pc, regs->ARM_pc);
+	sprint_symbol(sym_lr, regs->ARM_lr);
+#endif
+
 	if (in_interrupt())
+#if defined(CONFIG_HTC_DEBUG_KP)
+		panic("%.*s PC:%s LR:%s", TASK_COMM_LEN, thread->task->comm, sym_pc, sym_lr);
+#else
 		panic("Fatal exception in interrupt");
+#endif
 	if (panic_on_oops)
+#if defined(CONFIG_HTC_DEBUG_KP)
+		panic("%.*s PC:%s LR:%s", TASK_COMM_LEN, thread->task->comm, sym_pc, sym_lr);
+#else
 		panic("Fatal exception");
+#endif
 	if (signr)
 		do_exit(signr);
 }
@@ -434,6 +456,8 @@ asmlinkage void __exception do_undefinstr(struct pt_regs *regs)
 		return;
 
 die_sig:
+	trace_undef_instr(regs, (void *)pc);
+
 #ifdef CONFIG_DEBUG_USER
 	if (user_debug & UDBG_UNDEFINED) {
 		printk(KERN_INFO "%s (%d): undefined instruction: pc=%p\n",
@@ -585,7 +609,7 @@ asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 		return regs->ARM_r0;
 
 	case NR(set_tls):
-		thread->tp_value = regs->ARM_r0;
+		thread->tp_value[0] = regs->ARM_r0;
 		if (tls_emu)
 			return 0;
 		if (has_tls_reg) {
@@ -703,7 +727,7 @@ static int get_tp_trap(struct pt_regs *regs, unsigned int instr)
 	int reg = (instr >> 12) & 15;
 	if (reg == 15)
 		return 1;
-	regs->uregs[reg] = current_thread_info()->tp_value;
+	regs->uregs[reg] = current_thread_info()->tp_value[0];
 	regs->ARM_pc += 4;
 	return 0;
 }
@@ -786,6 +810,7 @@ void __pgd_error(const char *file, int line, pgd_t pgd)
 asmlinkage void __div0(void)
 {
 	printk("Division by zero in kernel.\n");
+	BUG_ON(PANIC_CORRUPTION);
 	dump_stack();
 }
 EXPORT_SYMBOL(__div0);

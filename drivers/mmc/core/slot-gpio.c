@@ -21,18 +21,84 @@ struct mmc_gpio {
 	int ro_gpio;
 	int cd_gpio;
 	char *ro_label;
-	char cd_label[0];
+	bool status;
+	char cd_label[0]; 
 };
+
+int mmc_gpio_get_status(struct mmc_host *host)
+{
+	int ret = -ENOSYS;
+	struct mmc_gpio *ctx = host->slot.handler_priv;
+
+	if (!ctx || !gpio_is_valid(ctx->cd_gpio))
+		goto out;
+
+	ret = !gpio_get_value_cansleep(ctx->cd_gpio) ^
+		!!(host->caps2 & MMC_CAP2_CD_ACTIVE_HIGH);
+out:
+	return ret;
+}
+
+int mmc_gpio_send_uevent(struct mmc_host *host)
+{
+	char *envp[2];
+	char state_string[16];
+	int status;
+
+	status = mmc_gpio_get_status(host);
+	if (unlikely(status < 0))
+		goto out;
+
+	snprintf(state_string, sizeof(state_string), "SWITCH_STATE=%d", status);
+	envp[0] = state_string;
+	envp[1] = NULL;
+	kobject_uevent_env(&host->class_dev.kobj, KOBJ_ADD, envp);
+
+out:
+	return status;
+}
+
 
 static irqreturn_t mmc_gpio_cd_irqt(int irq, void *dev_id)
 {
-	/* Schedule a card detection after a debounce timeout */
+	
 	struct mmc_host *host = dev_id;
+	struct mmc_gpio *ctx = host->slot.handler_priv;
+	int status;
+
+	if (!host->ops)
+		goto out;
 
 	if (host->ops->card_event)
 		host->ops->card_event(host);
 
-	mmc_detect_change(host, msecs_to_jiffies(200));
+	status = mmc_gpio_get_status(host);
+	if (unlikely(status < 0))
+		goto out;
+
+	if (status ^ ctx->status) {
+		pr_info("%s: slot status change detected (%d -> %d), GPIO_ACTIVE_%s\n",
+				mmc_hostname(host), ctx->status, status,
+				(host->caps2 & MMC_CAP2_CD_ACTIVE_HIGH) ?
+				"HIGH" : "LOW");
+		ctx->status = status;
+		
+		host->caps |= host->caps_uhs;
+		host->removed_cnt = 0;
+		host->crc_count = 0;
+
+#if 0
+		
+		mmc_detect_change(host, msecs_to_jiffies(200));
+#else
+		disable_irq_nosync(host->slot.cd_irq);
+		cancel_delayed_work(&host->detect);
+		mmc_debounce1(host);
+#endif
+
+		mmc_gpio_send_uevent(host);
+	}
+out:
 
 	return IRQ_HANDLED;
 }
@@ -46,11 +112,6 @@ static int mmc_gpio_alloc(struct mmc_host *host)
 
 	ctx = host->slot.handler_priv;
 	if (!ctx) {
-		/*
-		 * devm_kzalloc() can be called after device_initialize(), even
-		 * before device_add(), i.e., between mmc_alloc_host() and
-		 * mmc_add_host()
-		 */
 		ctx = devm_kzalloc(&host->class_dev, sizeof(*ctx) + 2 * len,
 				   GFP_KERNEL);
 		if (ctx) {
@@ -92,20 +153,6 @@ int mmc_gpio_get_cd(struct mmc_host *host)
 }
 EXPORT_SYMBOL(mmc_gpio_get_cd);
 
-/**
- * mmc_gpio_request_ro - request a gpio for write-protection
- * @host: mmc host
- * @gpio: gpio number requested
- *
- * As devm_* managed functions are used in mmc_gpio_request_ro(), client
- * drivers do not need to explicitly call mmc_gpio_free_ro() for freeing up,
- * if the requesting and freeing are only needed at probing and unbinding time
- * for once.  However, if client drivers do something special like runtime
- * switching for write-protection, they are responsible for calling
- * mmc_gpio_request_ro() and mmc_gpio_free_ro() as a pair on their own.
- *
- * Returns zero on success, else an error.
- */
 int mmc_gpio_request_ro(struct mmc_host *host, unsigned int gpio)
 {
 	struct mmc_gpio *ctx;
@@ -131,20 +178,6 @@ int mmc_gpio_request_ro(struct mmc_host *host, unsigned int gpio)
 }
 EXPORT_SYMBOL(mmc_gpio_request_ro);
 
-/**
- * mmc_gpio_request_cd - request a gpio for card-detection
- * @host: mmc host
- * @gpio: gpio number requested
- *
- * As devm_* managed functions are used in mmc_gpio_request_cd(), client
- * drivers do not need to explicitly call mmc_gpio_free_cd() for freeing up,
- * if the requesting and freeing are only needed at probing and unbinding time
- * for once.  However, if client drivers do something special like runtime
- * switching for card-detection, they are responsible for calling
- * mmc_gpio_request_cd() and mmc_gpio_free_cd() as a pair on their own.
- *
- * Returns zero on success, else an error.
- */
 int mmc_gpio_request_cd(struct mmc_host *host, unsigned int gpio)
 {
 	struct mmc_gpio *ctx;
@@ -160,20 +193,19 @@ int mmc_gpio_request_cd(struct mmc_host *host, unsigned int gpio)
 	ret = devm_gpio_request_one(&host->class_dev, gpio, GPIOF_DIR_IN,
 				    ctx->cd_label);
 	if (ret < 0)
-		/*
-		 * don't bother freeing memory. It might still get used by other
-		 * slot functions, in any case it will be freed, when the device
-		 * is destroyed.
-		 */
 		return ret;
 
-	/*
-	 * Even if gpio_to_irq() returns a valid IRQ number, the platform might
-	 * still prefer to poll, e.g., because that IRQ number is already used
-	 * by another unit and cannot be shared.
-	 */
 	if (irq >= 0 && host->caps & MMC_CAP_NEEDS_POLL)
 		irq = -EINVAL;
+
+	ctx->cd_gpio = gpio;
+	host->slot.cd_irq = irq;
+
+	ret = mmc_gpio_get_status(host);
+	if (ret < 0)
+		return ret;
+
+	ctx->status = ret;
 
 	if (irq >= 0) {
 		ret = devm_request_threaded_irq(&host->class_dev, irq,
@@ -184,24 +216,13 @@ int mmc_gpio_request_cd(struct mmc_host *host, unsigned int gpio)
 			irq = ret;
 	}
 
-	host->slot.cd_irq = irq;
-
 	if (irq < 0)
 		host->caps |= MMC_CAP_NEEDS_POLL;
-
-	ctx->cd_gpio = gpio;
 
 	return 0;
 }
 EXPORT_SYMBOL(mmc_gpio_request_cd);
 
-/**
- * mmc_gpio_free_ro - free the write-protection gpio
- * @host: mmc host
- *
- * It's provided only for cases that client drivers need to manually free
- * up the write-protection gpio requested by mmc_gpio_request_ro().
- */
 void mmc_gpio_free_ro(struct mmc_host *host)
 {
 	struct mmc_gpio *ctx = host->slot.handler_priv;
@@ -217,13 +238,6 @@ void mmc_gpio_free_ro(struct mmc_host *host)
 }
 EXPORT_SYMBOL(mmc_gpio_free_ro);
 
-/**
- * mmc_gpio_free_cd - free the card-detection gpio
- * @host: mmc host
- *
- * It's provided only for cases that client drivers need to manually free
- * up the card-detection gpio requested by mmc_gpio_request_cd().
- */
 void mmc_gpio_free_cd(struct mmc_host *host)
 {
 	struct mmc_gpio *ctx = host->slot.handler_priv;

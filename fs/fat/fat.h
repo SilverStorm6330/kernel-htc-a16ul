@@ -26,6 +26,8 @@
 #define FAT_NFS_STALE_RW	1      /* NFS RW support, can cause ESTALE */
 #define FAT_NFS_NOSTALE_RO	2      /* NFS RO support, no ESTALE issue */
 
+#define FAT_CHARSET_ERROR	9999
+
 struct fat_mount_options {
 	kuid_t fs_uid;
 	kgid_t fs_gid;
@@ -86,6 +88,7 @@ struct msdos_sb_info {
 	const void *dir_ops;	      /* Opaque; default directory operations */
 	int dir_per_block;	      /* dir entries per block */
 	int dir_per_block_bits;	      /* log2(dir_per_block) */
+	unsigned long vol_id;         /* volume ID */
 
 	int fatent_shift;
 	struct fatent_operations *fatent_ops;
@@ -387,10 +390,14 @@ static inline unsigned long fat_dir_hash(int logstart)
 /* fat/misc.c */
 extern __printf(3, 4) __cold
 void __fat_fs_error(struct super_block *sb, int report, const char *fmt, ...);
-#define fat_fs_error(sb, fmt, args...)		\
-	__fat_fs_error(sb, 1, fmt , ## args)
 #define fat_fs_error_ratelimit(sb, fmt, args...) \
 	__fat_fs_error(sb, __ratelimit(&MSDOS_SB(sb)->ratelimit), fmt , ## args)
+/*
+ * If removable devices with a fat fs are removed without a unmount, further
+ * accesses to the device by applications causes a large number of error prints
+ * & in some cases leads to watchdog bark.
+ */
+#define fat_fs_error(sb, fmt, args...)	fat_fs_error_ratelimit(sb, fmt, ## args)
 __printf(3, 4) __cold
 void fat_msg(struct super_block *sb, const char *level, const char *fmt, ...);
 #define fat_msg_ratelimit(sb, level, fmt, args...)	\

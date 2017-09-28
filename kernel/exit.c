@@ -58,6 +58,7 @@
 #include <asm/unistd.h>
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
+#include <htc_debug/stability/htc_process_debug.h>
 
 static void exit_mm(struct task_struct * tsk);
 
@@ -74,6 +75,7 @@ static void __unhash_process(struct task_struct *p, bool group_dead)
 		__this_cpu_dec(process_counts);
 	}
 	list_del_rcu(&p->thread_group);
+	list_del_rcu(&p->thread_node);
 }
 
 /*
@@ -281,6 +283,21 @@ static bool has_stopped_jobs(struct pid *pgrp)
 	return false;
 }
 
+static bool is_in_zygote_pgrp(struct task_struct *tsk){
+        struct pid *pgrp = task_pgrp(tsk);
+        struct task_struct *p;
+
+        for_each_process(p){
+		if(!strncmp("main",p->comm,4) && p->parent->pid == 1){
+                        if(pgrp == task_pgrp(p))
+                                return 1;
+                        else
+                                return 0;
+                }
+        }
+        return 0;
+}
+
 /*
  * Check to see if any process groups have become orphaned as
  * a result of our exiting, and if they have any stopped jobs,
@@ -306,7 +323,8 @@ kill_orphaned_pgrp(struct task_struct *tsk, struct task_struct *parent)
 	if (task_pgrp(parent) != pgrp &&
 	    task_session(parent) == task_session(tsk) &&
 	    will_become_orphaned_pgrp(pgrp, ignored_task) &&
-	    has_stopped_jobs(pgrp)) {
+	    has_stopped_jobs(pgrp) &&
+	    (!is_in_zygote_pgrp(tsk))) {
 		__kill_pgrp_info(SIGHUP, SEND_SIG_PRIV, pgrp);
 		__kill_pgrp_info(SIGCONT, SEND_SIG_PRIV, pgrp);
 	}
@@ -454,6 +472,7 @@ static void exit_mm(struct task_struct * tsk)
 {
 	struct mm_struct *mm = tsk->mm;
 	struct core_state *core_state;
+	int mm_released;
 
 	mm_release(tsk, mm);
 	if (!mm)
@@ -499,7 +518,10 @@ static void exit_mm(struct task_struct * tsk)
 	enter_lazy_tlb(mm, current);
 	task_unlock(tsk);
 	mm_update_next_owner(mm);
-	mmput(mm);
+
+	mm_released = mmput(mm);
+	if (mm_released)
+		set_tsk_thread_flag(tsk, TIF_MM_RELEASED);
 }
 
 /*
@@ -692,6 +714,7 @@ static void check_stack_usage(void)
 	static DEFINE_SPINLOCK(low_water_lock);
 	static int lowest_to_date = THREAD_SIZE;
 	unsigned long free;
+	int islower = false;
 
 	free = stack_not_used(current);
 
@@ -700,12 +723,16 @@ static void check_stack_usage(void)
 
 	spin_lock(&low_water_lock);
 	if (free < lowest_to_date) {
+		lowest_to_date = free;
+		islower = true;
+	}
+	spin_unlock(&low_water_lock);
+
+	if (islower) {
 		printk(KERN_WARNING "%s (%d) used greatest stack depth: "
 				"%lu bytes left\n",
 				current->comm, task_pid_nr(current), free);
-		lowest_to_date = free;
 	}
-	spin_unlock(&low_water_lock);
 }
 #else
 static inline void check_stack_usage(void) {}
@@ -743,8 +770,12 @@ void do_exit(long code)
 	 * leave this task alone and wait for reboot.
 	 */
 	if (unlikely(tsk->flags & PF_EXITING)) {
+#ifdef CONFIG_PANIC_ON_RECURSIVE_FAULT
+		panic("Recursive fault!\n");
+#else
 		printk(KERN_ALERT
 			"Fixing recursive fault but reboot is needed!\n");
+#endif
 		/*
 		 * We can do this unlocked here. The futex code uses
 		 * this flag just to verify whether the pi state
@@ -760,6 +791,9 @@ void do_exit(long code)
 	}
 
 	exit_signals(tsk);  /* sets PF_EXITING */
+
+	sched_exit(tsk);
+
 	/*
 	 * tsk->flags are checked in the futex code to protect against
 	 * an exiting task cleaning up the robust pi futexes.
@@ -840,7 +874,7 @@ void do_exit(long code)
 	/*
 	 * Make sure we are holding no locks:
 	 */
-	debug_check_no_locks_held(tsk);
+	debug_check_no_locks_held();
 	/*
 	 * We can do this unlocked here. The futex code uses this flag
 	 * just to verify whether the pi state cleanup has been done
@@ -916,7 +950,9 @@ do_group_exit(int exit_code)
 	struct signal_struct *sig = current->signal;
 
 	BUG_ON(exit_code & 0x80); /* core dumps don't get here */
-
+#ifdef CONFIG_HTC_PROCESS_DEBUG
+	do_group_exit_debug_dump(exit_code);
+#endif
 	if (signal_group_exit(sig))
 		exit_code = sig->group_exit_code;
 	else if (!thread_group_empty(current)) {

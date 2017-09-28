@@ -33,6 +33,9 @@
 #define ETH_ZLEN	60		/* Min. octets in frame sans FCS */
 #define ETH_DATA_LEN	1500		/* Max. octets in payload	 */
 #define ETH_FRAME_LEN	1514		/* Max. octets in frame sans FCS */
+/*++ 2014/12/02, USB Team, PCN00052 ++*/
+#define ETH_FRAME_LEN_MAX 9014		/* For CDC/NCM 			 */
+/*-- 2014/12/02, USB Team, PCN00052 --*/
 #define ETH_FCS_LEN	4		/* Octets in the FCS		 */
 
 /*
@@ -93,6 +96,8 @@
 #define ETH_P_QINQ3	0x9300		/* deprecated QinQ VLAN [ NOT AN OFFICIALLY REGISTERED ID ] */
 #define ETH_P_EDSA	0xDADA		/* Ethertype DSA [ NOT AN OFFICIALLY REGISTERED ID ] */
 #define ETH_P_AF_IUCV   0xFBFB		/* IBM af_iucv [ NOT AN OFFICIALLY REGISTERED ID ] */
+#define ETH_P_MAP	0xDA1A		/* Multiplexing and Aggregation Protocol
+					 *  NOT AN OFFICIALLY REGISTERED ID ] */
 
 #define ETH_P_802_3_MIN	0x0600		/* If the value in the ethernet type is less than this value
 					 * then the frame is Ethernet II. Else it is 802.3 */

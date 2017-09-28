@@ -74,6 +74,7 @@
 #include <linux/ptrace.h>
 #include <linux/blkdev.h>
 #include <linux/elevator.h>
+#include <linux/sched_clock.h>
 #include <linux/random.h>
 
 #include <asm/io.h>
@@ -128,6 +129,7 @@ extern void softirq_init(void);
 char __initdata boot_command_line[COMMAND_LINE_SIZE];
 /* Untouched saved command line (eg. for /proc) */
 char *saved_command_line;
+char *hashed_command_line;
 /* Command line for parameter parsing */
 static char *static_command_line;
 
@@ -351,6 +353,49 @@ static void __init setup_command_line(char *command_line)
 	strcpy (static_command_line, command_line);
 }
 
+#define RAW_SN_LEN 4
+static void __init hash_sn(void)
+{
+   char *p;
+   unsigned int td_sf = 0;
+   size_t cmdline_len, sf_len;
+
+   cmdline_len = strlen(saved_command_line);
+   sf_len = strlen("td.sf=");
+
+   hashed_command_line = alloc_bootmem(cmdline_len + 1);
+   strncpy(hashed_command_line, saved_command_line, cmdline_len);
+   hashed_command_line[cmdline_len] = '\0';
+
+   p = saved_command_line;
+   for (p = saved_command_line; p < saved_command_line + cmdline_len - sf_len; p++) {
+	if (!strncmp(p, "td.sf=", sf_len)) {
+	    p += sf_len;
+	    if (*p != '0')
+		td_sf = 1;
+	    break;
+	}
+   }
+   if (td_sf) {
+	unsigned int i;
+	size_t sn_len = 0;
+
+	for (p = hashed_command_line; p < hashed_command_line + cmdline_len - strlen("androidboot.serialno="); p++) {
+	    if (!strncmp(p, "androidboot.serialno=", strlen("androidboot.serialno="))) {
+		p += strlen("androidboot.serialno=");
+		while (*p != ' '  && *p != '\0') {
+		    sn_len++;
+		    p++;
+		}
+		p -= sn_len;
+		for (i = sn_len - 1; i >= RAW_SN_LEN; i--)
+		    *p++ = '*';
+		break;
+	    }
+	}
+   }
+}
+
 /*
  * We need to finalize in a non-__init function or else race conditions
  * between the root thread and the init thread may cause start_kernel to
@@ -365,6 +410,7 @@ static __initdata DECLARE_COMPLETION(kthreadd_done);
 static noinline void __init_refok rest_init(void)
 {
 	int pid;
+	const struct sched_param param = { .sched_priority = 1 };
 
 	rcu_scheduler_starting();
 	/*
@@ -378,6 +424,7 @@ static noinline void __init_refok rest_init(void)
 	rcu_read_lock();
 	kthreadd_task = find_task_by_pid_ns(pid, &init_pid_ns);
 	rcu_read_unlock();
+	sched_setscheduler_nocheck(kthreadd_task, SCHED_FIFO, &param);
 	complete(&kthreadd_done);
 
 	/*
@@ -482,11 +529,6 @@ asmlinkage void __init start_kernel(void)
 	smp_setup_processor_id();
 	debug_objects_early_init();
 
-	/*
-	 * Set up the the initial canary ASAP:
-	 */
-	boot_init_stack_canary();
-
 	cgroup_init_early();
 
 	local_irq_disable();
@@ -500,9 +542,14 @@ asmlinkage void __init start_kernel(void)
 	page_address_init();
 	pr_notice("%s", linux_banner);
 	setup_arch(&command_line);
+	/*
+	 * Set up the the initial canary ASAP:
+	 */
+	boot_init_stack_canary();
 	mm_init_owner(&init_mm, &init_task);
 	mm_init_cpumask(&init_mm);
 	setup_command_line(command_line);
+        hash_sn();
 	setup_nr_cpu_ids();
 	setup_per_cpu_areas();
 	smp_prepare_boot_cpu();	/* arch-specific boot-cpu hooks */
@@ -510,7 +557,7 @@ asmlinkage void __init start_kernel(void)
 	build_all_zonelists(NULL, NULL);
 	page_alloc_init();
 
-	pr_notice("Kernel command line: %s\n", boot_command_line);
+	pr_notice("Kernel command line: %s\n", hashed_command_line);
 	parse_early_param();
 	parse_args("Booting kernel", static_command_line, __start___param,
 		   __stop___param - __start___param,
@@ -556,6 +603,7 @@ asmlinkage void __init start_kernel(void)
 	softirq_init();
 	timekeeping_init();
 	time_init();
+	sched_clock_postinit();
 	profile_init();
 	call_function_init();
 	WARN(!irqs_disabled(), "Interrupts were enabled early\n");

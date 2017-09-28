@@ -23,6 +23,7 @@
 #include <net/route.h>
 #include <net/tcp_states.h>
 #include <net/xfrm.h>
+#include <net/htc_net_debug.h>
 
 #ifdef INET_CSK_DEBUG
 const char inet_csk_timer_bug_msg[] = "inet_csk BUG: unknown timer value\n";
@@ -417,12 +418,13 @@ struct dst_entry *inet_csk_route_req(struct sock *sk,
 	struct net *net = sock_net(sk);
 	int flags = inet_sk_flowi_flags(sk);
 
-	flowi4_init_output(fl4, sk->sk_bound_dev_if, sk->sk_mark,
+	flowi4_init_output(fl4, sk->sk_bound_dev_if, ireq->ir_mark,
 			   RT_CONN_FLAGS(sk), RT_SCOPE_UNIVERSE,
 			   sk->sk_protocol,
 			   flags,
 			   (opt && opt->opt.srr) ? opt->opt.faddr : ireq->rmt_addr,
-			   ireq->loc_addr, ireq->rmt_port, inet_sk(sk)->inet_sport);
+			   ireq->loc_addr, ireq->rmt_port, inet_sk(sk)->inet_sport,
+			   sock_i_uid(sk));
 	security_req_classify_flow(req, flowi4_to_flowi(fl4));
 	rt = ip_route_output_flow(net, fl4, sk);
 	if (IS_ERR(rt))
@@ -454,11 +456,12 @@ struct dst_entry *inet_csk_route_child_sock(struct sock *sk,
 
 	rcu_read_lock();
 	opt = rcu_dereference(newinet->inet_opt);
-	flowi4_init_output(fl4, sk->sk_bound_dev_if, sk->sk_mark,
+	flowi4_init_output(fl4, sk->sk_bound_dev_if, inet_rsk(req)->ir_mark,
 			   RT_CONN_FLAGS(sk), RT_SCOPE_UNIVERSE,
 			   sk->sk_protocol, inet_sk_flowi_flags(sk),
 			   (opt && opt->opt.srr) ? opt->opt.faddr : ireq->rmt_addr,
-			   ireq->loc_addr, ireq->rmt_port, inet_sk(sk)->inet_sport);
+			   ireq->loc_addr, ireq->rmt_port, inet_sk(sk)->inet_sport,
+			   sock_i_uid(sk));
 	security_req_classify_flow(req, flowi4_to_flowi(fl4));
 	rt = ip_route_output_flow(net, fl4, sk);
 	if (IS_ERR(rt))
@@ -682,11 +685,14 @@ struct sock *inet_csk_clone_lock(const struct sock *sk,
 
 		newsk->sk_state = TCP_SYN_RECV;
 		newicsk->icsk_bind_hash = NULL;
+		NET_DEBUG("%s: [0x%p] sk:0x%p, sk_state:%d, pid:%d, process:%s.\n", __func__, current_thread_info()->task, sk, sk->sk_state, current->pid, current->comm);
 
 		inet_sk(newsk)->inet_dport = inet_rsk(req)->rmt_port;
 		inet_sk(newsk)->inet_num = ntohs(inet_rsk(req)->loc_port);
 		inet_sk(newsk)->inet_sport = inet_rsk(req)->loc_port;
 		newsk->sk_write_space = sk_stream_write_space;
+
+		newsk->sk_mark = inet_rsk(req)->ir_mark;
 
 		newicsk->icsk_retransmits = 0;
 		newicsk->icsk_backoff	  = 0;
